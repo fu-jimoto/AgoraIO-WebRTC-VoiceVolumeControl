@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>VoiceVolumeControl</title>
+<script src="AgoraRTC_N-4.7.1.js"></script>
+<script src="agora-rtm-sdk-1.4.3.js"></script>
+<script src="vendor/jquery.js"></script>
+<link rel="stylesheet" href="index.css">
+</head>
+
+<body>
+<div id="div_device" class="">
+<div class="select">
+<label for="audioSource">Audio source: </label><select id="audioSource"></select>
+</div>
+</div>
+
+<div id="div_join" class="">
+<div class="">
+App ID: <input id="appId" type="text" value="" size="36"></input>
+Channel: <input id="channel" type="text" value="VoiceVolumeControl" size="4"></input>
+Position:
+<select id="position" onchange="changePosition();">
+  <option value="1">1</option>
+  <option value="2">2</option>
+  <option value="3">3</option>
+  <option value="4">4</option>
+  <option value="5">5</option>
+</select>
+ニックネーム: <input id="nickname" type="text" value="" size="10"></input>
+<button id="join" class="" onclick="join()">Join</button>
+</div>
+</div>
+
+<p>position</p>
+<div id="position1" class="position">position:1</div>
+<div id="position2" class="position">position:2</div>
+<div id="position3" class="position">position:3</div>
+<div id="position4" class="position">position:4</div>
+<div id="position5" class="position">position:5</div>
+
+<script language="javascript">
+if(!AgoraRTC.checkSystemRequirements()) {
+  alert("Your browser does not support WebRTC!");
+}
+
+//voice
+var client  = AgoraRTC.createClient({mode: 'rtc', codec:'vp8'});
+var audioSelect = document.querySelector('select#audioSource');
+var users = {};
+var remoteUsers = {};
+var localTracks = {
+  audioTrack: null
+};
+
+//rtm
+var rtm, rtmChannel;
+
+//user info
+var min  = 1000;
+var max  = 2000;
+var rand = Math.floor( Math.random() * (max + 1 - min) ) + min
+var userInfo = {
+  uid: rand,
+  nickname: null,
+  position: null,
+  join: false
+};
+
+async function joinRTM(){
+  //rtm
+  rtm = AgoraRTM.createInstance(appId.value);
+  await rtm.login({ token: '', uid: String(userInfo.uid) }).then(() => {
+    console.log('AgoraRTM client login success');
+    rtm.on('MessageFromPeer', async function (message, peerId) {
+      var res = JSON.parse(message.text);
+      if(res.meta == "getPosition"){//他拠点からの位置確認
+        rtm.sendMessageToPeer({ text: JSON.stringify({meta: "resPosition", nickname: userInfo.nickname, position: userInfo.position}) }, peerId,).then(sendResult => {
+        }).catch(error => {
+        });
+      }else if(res.meta == "resPosition"){//他拠点の位置情報取得
+        console.log("RTM: MessageFromPeer:pos");
+        users[peerId] = {nickname: res.nickname, position: res.position};
+        updateUserInfo();
+        var dist = userInfo.position - res.position;
+        var volume = 100 - (Math.abs(dist))*20;
+        subscribe(remoteUsers[peerId].user, remoteUsers[peerId].mediaType, volume);
+      }
+    });
+
+    //rtm channel
+    rtmChannel = rtm.createChannel(channel.value);
+    rtmChannel.join().then(()=>{
+      console.log("RTM Join Channel Success");
+      rtmChannel.on('ChannelMessage', function (message, memberId) {
+        console.log("Get channel message:"+memberId);
+        console.dir(message);
+        var res = JSON.parse(message.text);
+        if(res.meta == "changePosition"){//他拠点が位置を変更した通知
+          users[memberId] = {nickname: res.nickname, position: res.position};
+          updateUserInfo();
+          var dist = userInfo.position - res.position;
+          var volume = 100 - (Math.abs(dist))*20;
+          remoteUsers[memberId].user.audioTrack.setVolume(volume);
+        }
+      });
+    });
+  }).catch(err => {
+      console.log('AgoraRTM client login failure', err);
+  });
+
+}
+
+
+async function join() {
+
+  userInfo.nickname = nickname.value;
+  userInfo.position = position.value;
+
+  await joinRTM();
+
+  client.on("user-published", handleUserPublished);
+  client.on("user-unpublished", handleUserUnpublished);
+
+  [ uid, localTracks.audioTrack ] = await Promise.all([
+    client.join(appId.value,channel.value, null,userInfo.uid),
+    AgoraRTC.createMicrophoneAudioTrack({microphoneId:audioSource.value})
+  ]);
+
+  userInfo.join = true;
+  await client.publish(localTracks.audioTrack);
+  console.log("publish success");
+  users[uid] = {nickname: nickname.value, position: position.value};
+  updateUserInfo();
+
+}
+
+async function subscribe(user, mediaType,volume) {
+  const uid = user.uid;
+  await client.subscribe(user, mediaType);
+  console.log("subscribe success");
+  user.audioTrack.setVolume(volume);
+  user.audioTrack.play();
+}
+
+function handleUserPublished(user, mediaType) {
+  console.log("handleUserPublished");
+  const id = user.uid;
+  remoteUsers[id] = {user:user, mediaType:mediaType};
+  rtm.sendMessageToPeer({ text: JSON.stringify({meta: "getPosition"}) }, String(id), ).then(sendResult => {//位置情報を要求
+    console.dir(sendResult);
+  }).catch(error => {
+  });
+}
+
+function handleUserUnpublished(user) {
+  const id = user.uid;
+  delete remoteUsers[id];
+  delete users[id];
+  $("#user_"+id).remove();
+}
+
+function sendUserInfo(uid){
+  var info = JSON.stringify({nickname: nickname.value, uid: uid});
+  rtmChannel.sendMessage({text: info});
+}
+
+function updateUserInfo(){
+  for(var i in users){
+    $("#user_"+i).remove();
+    var userLabel = $(`<p id="user_${i}" class="users">${users[i].nickname}</p>`);
+    $('#position'+users[i].position).append(userLabel);
+  }
+}
+
+function changePosition(){
+  if(userInfo.join === true){
+    userInfo.position = position.value;
+    //参加者全員に位置変更を通知
+    rtmChannel.sendMessage({text: JSON.stringify({meta: "changePosition", nickname: userInfo.nickname, position: userInfo.position})});
+    users[userInfo.uid] = {nickname: userInfo.nickname, position: userInfo.position};
+    updateUserInfo();
+
+    //自分自身も他拠点の音量を変更
+    for(var i in users){
+      if(i != userInfo.uid){
+        var dist = userInfo.position - users[i].position;
+        var volume = 100 - (Math.abs(dist))*20;
+        remoteUsers[i].user.audioTrack.setVolume(volume);
+      }
+    } 
+  }
+}
+
+function getDevices() {
+    AgoraRTC.getDevices().then(devices => {
+    for (var i = 0; i !== devices.length; ++i) {
+      var device = devices[i];
+      var option = document.createElement('option');
+      option.value = device.deviceId;
+      if (device.kind === 'audioinput') {
+        option.text = device.label || 'microphone ' + (audioSelect.length + 1);
+        audioSelect.appendChild(option);
+      } else {
+        console.log('Some other kind of source/device: ', device);
+      }
+    }
+  }).catch(e => {
+    console.log("get devices error!", e);
+  });
+}
+
+getDevices();
+</script>
+</body>
+</html>
